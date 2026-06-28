@@ -1,0 +1,18 @@
+[package]
+name = "synapse_ppm_bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Synapse ManualControl to PPM encoder serial bridge"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "synapse-ppm-bridge"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive", "env"] }
+flatbuffers = "=25.12.19"
+serialport = "4.9"
+synapse_fbs = "0.1.5"
+thiserror = "2.0"
+zenoh = "1.9"
