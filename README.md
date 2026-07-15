@@ -1,6 +1,6 @@
 # synapse_ppm_bridge
 
-Rust bridge from Synapse `ManualControl` FlatBuffers on Zenoh to the serial
+Rust bridge from Synapse `ManualControlData` bare structs on Zenoh to the serial
 packet consumed by the `ppm_bridge` Arduino encoder.
 
 Run with the defaults used by the original ROS 2 bridge:
@@ -12,14 +12,14 @@ cargo run --bin synapse-ppm-bridge -- \
   --baud-rate 57600
 ```
 
-The default input topic is `synapse/manual_control`. Payloads must be
-`synapse.topic.ManualControl` FlatBuffers from the `synapse_fbs` crate.
+The default input topic is `manual`. Payloads must be bare
+`synapse.topic.ManualControlData` structs from the `synapse_fbs` crate.
 
 Useful environment variables:
 
 ```sh
 ZENOH_CONNECT=udp/127.0.0.1:7447 \
-ZENOH_TOPIC=synapse/manual_control \
+ZENOH_TOPIC=manual \
 PPM_SERIAL_DEVICE=/dev/ttyACM0 \
 PPM_BAUD_RATE=57600 \
 PPM_CHANNEL_MAP=1,2,0,3,4 \

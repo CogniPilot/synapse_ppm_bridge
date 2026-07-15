@@ -13,6 +13,6 @@ path = "src/main.rs"
 clap = { version = "4.6", features = ["derive", "env"] }
 flatbuffers = "=25.12.19"
 serialport = "4.9"
-synapse_fbs = "0.1.5"
+synapse_fbs = "0.8.0"
 thiserror = "2.0"
 zenoh = "1.9"

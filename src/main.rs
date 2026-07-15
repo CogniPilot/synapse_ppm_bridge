@@ -2,7 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use clap::Parser;
-use synapse_fbs::topic::ManualControl;
+use synapse_fbs::topic::ManualControlData;
 use synapse_ppm_bridge::{
     ChannelMap, PpmChannels, build_packet, channel_map_from_slice, manual_control_to_channels,
 };
@@ -13,15 +13,15 @@ use zenoh::{Wait, config::Config};
 #[command(
     name = "synapse-ppm-bridge",
     version,
-    about = "Bridge Synapse ManualControl FlatBuffers on Zenoh to a PPM encoder serial link",
-    long_about = "Subscribes to a Synapse ManualControl FlatBuffer over Zenoh, maps normalized \
+    about = "Bridge Synapse manual-control data on Zenoh to a PPM encoder serial link",
+    long_about = "Subscribes to a Synapse ManualControlData bare struct over Zenoh, maps normalized \
 manual-control axes to PWM microsecond values, and sends the same 14-byte serial packet used by \
 the ROS ppm_bridge Arduino encoder.",
     next_line_help = true,
     after_help = "\
 Examples:
   synapse-ppm-bridge --serial-device /dev/ttyACM0
-  synapse-ppm-bridge --topic synapse/manual_control --channel-map 1,2,0,3,4
+  synapse-ppm-bridge --topic manual --channel-map 1,2,0,3,4
 
 Environment:
   ZENOH_CONNECT, ZENOH_TOPIC
@@ -55,8 +55,8 @@ struct ZenohArgs {
         alias = "zenoh-topic",
         env = "ZENOH_TOPIC",
         value_name = "KEYEXPR",
-        default_value = "synapse/manual_control",
-        help = "Zenoh key expression carrying synapse.topic.ManualControl payloads"
+        default_value = "manual",
+        help = "Zenoh key expression carrying synapse.topic.ManualControlData bare structs"
     )]
     topic: String,
 }
@@ -116,11 +116,12 @@ enum BridgeError {
     SerialWrite(#[from] std::io::Error),
     #[error("channel map error: {0}")]
     ChannelMap(#[from] synapse_ppm_bridge::ChannelMapError),
-    #[error("manual control payload is missing data")]
-    MissingManualControlData,
-    #[error("invalid ManualControl flatbuffer: {0}")]
-    InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
+    #[error("manual control payload is {actual} bytes, expected {expected}")]
+    InvalidManualControlSize { expected: usize, actual: usize },
 }
+
+/// Wire size of a bare `synapse.topic.ManualControlData` struct.
+const MANUAL_CONTROL_PAYLOAD_SIZE: usize = 40;
 
 type Result<T> = std::result::Result<T, BridgeError>;
 
@@ -155,12 +156,10 @@ fn run(cli: Cli, channel_map: ChannelMap) -> Result<()> {
         let payload = sample.payload().to_bytes();
         let channels = match channels_from_payload(&payload, channel_map) {
             Ok(channels) => channels,
-            Err(BridgeError::InvalidFlatbuffer(error)) => {
-                eprintln!("dropping invalid ManualControl flatbuffer: {error}");
-                continue;
-            }
-            Err(BridgeError::MissingManualControlData) => {
-                eprintln!("dropping ManualControl payload without data");
+            Err(BridgeError::InvalidManualControlSize { expected, actual }) => {
+                eprintln!(
+                    "dropping manual control payload with {actual} bytes; expected {expected}"
+                );
                 continue;
             }
             Err(error) => return Err(error),
@@ -184,9 +183,62 @@ fn zenoh_config(cli: &Cli) -> Result<Config> {
 }
 
 fn channels_from_payload(payload: &[u8], channel_map: ChannelMap) -> Result<PpmChannels> {
-    let manual_control = flatbuffers::root::<ManualControl>(payload)?;
-    let data = manual_control
-        .data()
-        .ok_or(BridgeError::MissingManualControlData)?;
+    if payload.len() != MANUAL_CONTROL_PAYLOAD_SIZE {
+        return Err(BridgeError::InvalidManualControlSize {
+            expected: MANUAL_CONTROL_PAYLOAD_SIZE,
+            actual: payload.len(),
+        });
+    }
+
+    // Safety: FlatBuffers fixed-layout structs use unaligned accessors and the
+    // exact-size check above covers the complete struct at offset zero.
+    let data = unsafe { <ManualControlData as flatbuffers::Follow>::follow(payload, 0) };
     Ok(channel_map.apply(manual_control_to_channels(data)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synapse_fbs::topic::{ManualControlAxes, ManualControlFlags};
+
+    #[test]
+    fn decodes_synapse_0_8_bare_manual_control_payload() {
+        let axes = ManualControlAxes::Pitch
+            | ManualControlAxes::Roll
+            | ManualControlAxes::Throttle
+            | ManualControlAxes::Yaw;
+        let flags = ManualControlFlags::Active | ManualControlFlags::Valid;
+        let data = ManualControlData::new(
+            42,
+            0,
+            axes.bits(),
+            -250,
+            500,
+            750,
+            -500,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            flags.bits(),
+        );
+
+        let channels = channels_from_payload(&data.0, ChannelMap([0, 1, 2, 3, 4])).unwrap();
+        assert_eq!(channels, PpmChannels([1750, 1750, 1625, 1250, 2000]));
+    }
+
+    #[test]
+    fn rejects_non_struct_payload_sizes() {
+        let error = channels_from_payload(&[0; 39], ChannelMap([0, 1, 2, 3, 4])).unwrap_err();
+        assert!(matches!(
+            error,
+            BridgeError::InvalidManualControlSize {
+                expected: 40,
+                actual: 39
+            }
+        ));
+    }
 }

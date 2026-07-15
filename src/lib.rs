@@ -1,4 +1,4 @@
-use synapse_fbs::topic::ManualControlData;
+use synapse_fbs::topic::{ManualControlData, ManualControlFlags};
 
 pub const NUM_CHANNELS: usize = 5;
 pub const PACKET_LEN: usize = 14;
@@ -69,16 +69,19 @@ pub fn channel_map_from_slice(channels: &[usize]) -> Result<ChannelMap, ChannelM
 }
 
 pub fn manual_control_to_channels(data: &ManualControlData) -> PpmChannels {
-    if !data.valid() || !data.active() || data.kill_switch() {
+    let flags = ManualControlFlags::from_bits_retain(data.flags());
+    if !flags.contains(ManualControlFlags::Valid)
+        || !flags.contains(ManualControlFlags::Active)
+        || flags.contains(ManualControlFlags::KillSwitch)
+    {
         return PpmChannels(FAILSAFE_CHANNELS);
     }
 
-    let axes = data.axes();
     PpmChannels([
-        throttle_to_pwm(axes.throttle()),
-        centered_to_pwm(axes.roll()),
-        centered_to_pwm(-axes.pitch()),
-        centered_to_pwm(axes.yaw()),
+        throttle_to_pwm(milli_to_normalized(data.throttle_milli())),
+        centered_to_pwm(milli_to_normalized(data.roll_milli())),
+        centered_to_pwm(-milli_to_normalized(data.pitch_milli())),
+        centered_to_pwm(milli_to_normalized(data.yaw_milli())),
         mode_to_pwm(data.flight_mode()),
     ])
 }
@@ -116,6 +119,10 @@ fn mode_to_pwm(flight_mode: u8) -> u16 {
     if flight_mode == 0 { 1000 } else { 2000 }
 }
 
+fn milli_to_normalized(value: i16) -> f32 {
+    f32::from(value) / 1000.0
+}
+
 fn scale_to_pwm(value: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> u16 {
     let value = if value.is_finite() { value } else { in_min };
     let normalized = ((value - in_min) / (in_max - in_min)).clamp(0.0, 1.0);
@@ -125,7 +132,43 @@ fn scale_to_pwm(value: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synapse_fbs::topic::{ManualControlAux8f, ManualControlAxes, ManualControlData};
+    use synapse_fbs::topic::{ManualControlAxes, ManualControlData, ManualControlFlags};
+
+    const STICK_AXES: ManualControlAxes = ManualControlAxes::Pitch
+        .union(ManualControlAxes::Roll)
+        .union(ManualControlAxes::Throttle)
+        .union(ManualControlAxes::Yaw);
+
+    fn to_milli(value: f32) -> i16 {
+        (value * 1000.0).round().clamp(-1000.0, 1000.0) as i16
+    }
+
+    fn manual_control_data_with_flags(
+        roll: f32,
+        pitch: f32,
+        yaw: f32,
+        throttle: f32,
+        flight_mode: u8,
+        flags: ManualControlFlags,
+    ) -> ManualControlData {
+        ManualControlData::new(
+            42,
+            0,
+            STICK_AXES.bits(),
+            to_milli(pitch),
+            to_milli(roll),
+            to_milli(throttle),
+            to_milli(yaw),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            flight_mode,
+            flags.bits(),
+        )
+    }
 
     fn manual_control_data(
         roll: f32,
@@ -134,15 +177,13 @@ mod tests {
         throttle: f32,
         flight_mode: u8,
     ) -> ManualControlData {
-        ManualControlData::new(
-            42,
-            &ManualControlAxes::new(roll, pitch, yaw, throttle),
-            &ManualControlAux8f::default(),
+        manual_control_data_with_flags(
+            roll,
+            pitch,
+            yaw,
+            throttle,
             flight_mode,
-            false,
-            false,
-            true,
-            true,
+            ManualControlFlags::Active | ManualControlFlags::Valid,
         )
     }
 
@@ -157,10 +198,16 @@ mod tests {
 
     #[test]
     fn invalid_or_kill_switch_messages_use_failsafe_channels() {
-        let axes = ManualControlAxes::new(1.0, 1.0, 1.0, 1.0);
-        let aux = ManualControlAux8f::default();
-        let invalid = ManualControlData::new(0, &axes, &aux, 1, false, false, true, false);
-        let killed = ManualControlData::new(0, &axes, &aux, 1, false, true, true, true);
+        let invalid =
+            manual_control_data_with_flags(1.0, 1.0, 1.0, 1.0, 1, ManualControlFlags::Active);
+        let killed = manual_control_data_with_flags(
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1,
+            ManualControlFlags::Active | ManualControlFlags::Valid | ManualControlFlags::KillSwitch,
+        );
 
         assert_eq!(
             manual_control_to_channels(&invalid),
